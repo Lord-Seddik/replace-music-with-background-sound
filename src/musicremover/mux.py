@@ -1,7 +1,9 @@
 """Write the output video (the only module that writes video files)."""
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 _AUDIO_CODECS = {
@@ -37,7 +39,14 @@ def mux(
             raise ValueError("Output path is the same file as the original")
         raise FileExistsError(f"Output already exists: {out}")
 
-    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-n",
+    # Write to a temp file we create ourselves; only that file may be deleted.
+    fd, tmp_name = tempfile.mkstemp(
+        dir=out.parent, prefix="." + out.stem + ".",
+        suffix=".partial" + out.suffix)
+    os.close(fd)
+    tmp = Path(tmp_name)
+
+    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-y",
            "-i", str(original), "-i", str(new_audio),
            "-map", "0:v?", "-map", "1:a:0"]
     if keep_original:
@@ -52,15 +61,27 @@ def mux(
             "-metadata:s:a:0", f"title={title}"]
     if language:
         cmd += ["-metadata:s:a:0", f"language={language}"]
-    cmd.append(str(out))
+    cmd.append(str(tmp))
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
-    except FileNotFoundError as exc:
-        raise RuntimeError("ffmpeg not found on PATH") from exc
-    if proc.returncode != 0:
-        if out.exists():
-            out.unlink()  # partial file: it did not exist before
-        raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()}")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace")
+        except FileNotFoundError as exc:
+            raise RuntimeError("ffmpeg not found on PATH") from exc
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {proc.stderr.strip()}")
+        _place(tmp, out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)  # only our own temp file
+        raise
     return out
+
+
+def _place(tmp: Path, out: Path) -> None:
+    """Move ``tmp`` to ``out`` without ever replacing an existing file."""
+    if os.name == "nt":
+        os.rename(tmp, out)  # refuses to replace an existing file
+    else:
+        os.link(tmp, out)  # fails if ``out`` exists
+        os.unlink(tmp)

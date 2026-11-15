@@ -164,3 +164,52 @@ def test_failure_leaves_no_partial(media, tmp_path):
     with pytest.raises(RuntimeError):
         mux(media, tmp_path / "missing.wav", out)
     assert not out.exists()
+
+
+def _partials(folder):
+    return [p.name for p in Path(folder).iterdir() if ".partial" in p.name]
+
+
+def test_failure_leaves_no_partial_file(media, tmp_path):
+    out = tmp_path / "o.mkv"
+    with pytest.raises(RuntimeError):
+        mux(media, tmp_path / "missing.wav", out)
+    assert not out.exists()
+    assert _partials(tmp_path) == []
+
+
+def test_success_leaves_no_partial_file(media, new_wav, tmp_path):
+    out = mux(media, new_wav, tmp_path / "o.mkv")
+    assert out.is_file()
+    assert _partials(tmp_path) == []
+
+
+def test_race_does_not_touch_other_file(media, new_wav, tmp_path, monkeypatch):
+    import musicremover.mux as mux_mod
+
+    out = tmp_path / "o.mkv"
+    real_run = subprocess.run
+
+    def racing_run(*args, **kwargs):
+        out.write_bytes(b"someone else's file")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(mux_mod.subprocess, "run", racing_run)
+    with pytest.raises(FileExistsError):
+        mux(media, new_wav, out)
+    assert out.read_bytes() == b"someone else's file"
+    assert _partials(tmp_path) == []
+
+
+def test_keyboard_interrupt_cleans_up(media, new_wav, tmp_path, monkeypatch):
+    import musicremover.mux as mux_mod
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mux_mod.subprocess, "run", interrupted)
+    out = tmp_path / "o.mkv"
+    with pytest.raises(KeyboardInterrupt):
+        mux(media, new_wav, out)
+    assert not out.exists()
+    assert _partials(tmp_path) == []

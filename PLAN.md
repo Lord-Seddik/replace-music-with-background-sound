@@ -274,7 +274,23 @@ Approach, cheapest and safest first:
 Order: T15 → T16 → T19 give a complete, local feature. T17 and T18 are
 independent experiments and go ahead only if you want them.
 
-### T15 — Find the gaps `[hard]` — todo
+> **Proposed change after measuring (T15, 2026-11-15) — please confirm.**
+> In Clannad E20 the music is audible 74 % of the time and is the main
+> background about 60 % of the time (~14 min of gaps). Under the music the
+> effects stem is nearly silent (median −77 dB): the studio used music
+> *instead of* ambience. The whole episode has only ~28 s of speech-free,
+> music-free ambience, and 17 of its 25 minutes have none. So:
+> - T16 (reuse the episode's own ambience) can fill only a few gaps; it
+>   becomes a small extra layer, not the main path.
+> - The main path becomes T18 (a library of ambience recordings), with the
+>   scene recognised from the **picture** (an image model such as CLIP)
+>   instead of from the sound, since there is no background sound to tag.
+> - T17 (generation) stays an experiment.
+> - New order: T15 → T18 → T16 → T19; T17 if you want it.
+> - This needs your answer to open question 1 (adding sound that was not
+>   in the episode), and a source of ambience recordings (question 4).
+
+### T15 — Find the gaps `[hard]` — done
 - Goal: list every stretch (≥ 2 s) where, after music removal, the
   non-speech background is much quieter than it was with music (thresholds
   measured, not guessed), plus video scene cuts (`ffmpeg` scene detection).
@@ -283,6 +299,23 @@ independent experiments and go ahead only if you want them.
   `experiments/` script to print the gap list for the test episode.
 - Verify: `pytest`; the gap list for Clannad E20, and you listen to three of
   them to confirm they feel empty.
+- Measured thresholds (0.1 s levels, 1 s smoothing): music audible = music
+  stem > −50 dB; a gap = music audible and ≥ 15 dB above the effects stem
+  (61 % of the episode; the result barely changes between 6 and 20 dB).
+- Built: `gaps.py` (`find_gaps`, `split_at_cuts`, `frame_levels`),
+  `scenes.py` (`scene_cuts`, ffmpeg scene score 0.3 on frames scaled to
+  256 px, ~17× real time), `tests/test_gaps.py` (8 tests), experiment
+  `experiments/list_gaps.py`. 137 tests pass.
+- Clannad E20: 294 scene cuts; 63 gaps, 14.6 min, 180 pieces after
+  splitting at cuts; list in `output/t15/gaps.csv`. Most gaps are dialogue
+  under quiet music (music ≈ −38 dB, background −60 to −100 dB). The opening
+  (2:08–3:18) and ending (22:19–23:36) are gaps too — T18 should probably
+  not fill songs over credits (new item for T18). The gap at 20:30 is the
+  laugh, from stems made before T13; the real pipeline finds gaps after the
+  voice rescue.
+- Your check (2026-11-16): the sample gaps "kinda do" feel empty. Listened to: `output/t15/1_no_talk_22-19.8.mkv` (the
+  ending), `2_talk_13-30.2.mkv` (a minute of dialogue under music) and
+  `3_typical_20-51.4.mkv`, and say whether they feel empty.
 
 ### T16 — Ambience fill from the episode itself `[hard]` — todo
 - Goal: fill each gap with background sound taken from speech-free, music-
@@ -305,18 +338,35 @@ independent experiments and go ahead only if you want them.
 - Verify: three gap scenes generated (or a written reason why not); you
   listen and decide go / no-go.
 
-### T18 — Ambience from your own sound library `[medium]` — todo
-- Goal: `--fill library --library DIR`: tag each gap scene's sound (PANNs or
-  similar, licence checked) and pick the closest-matching recording from
-  your folder.
-- Files: `src/musicremover/library.py`, tests.
-- Verify: `pytest` with a tiny generated library; by hand on the episode.
+### T18 — Ambience from a sound library `[hard]` (was medium; now the main path) — todo
+- Goal: `--fill library --library DIR`: recognise each gap scene from its
+  video frames (an image model such as CLIP comparing frames with short
+  descriptions like "classroom", "street at night", "park in summer",
+  "quiet bedroom"; licence and 4 GB fit checked first) and lay a matching
+  ambience recording from the library under the gap, quietly, with fades at
+  scene cuts. The library is a folder of recordings named or tagged by
+  scene type; nothing with music in it.
+- Files: `src/musicremover/scenes.py` (frames, cuts, scene labels),
+  `src/musicremover/library.py`, tests.
+- Verify: `pytest` with a tiny generated library; scene labels for the test
+  episode's gaps checked by you on a few stills; by hand on the episode.
+- From T15: do not fill the opening and ending songs (long gaps with loud
+  music and almost no talk, near the start and end); decide with you how
+  to recognise them, or reuse `--keep` ranges.
 
 ### T19 — Fill options and docs `[medium]` — todo
 - Goal: `--fill {none,ambience,library,generate}` (default decided after
   you listen), `--fill-level DB`, README section.
 - Files: `cli.py`, `README.md`, tests.
 - Verify: `pytest`; README examples run.
+
+### Stage 2 answers (2026-11-15)
+- Adding sound that was not in the episode: **yes**. The proposed change
+  above (library as main path, scene from the picture) is confirmed.
+- Ambience source: **a CC0 pack the user downloads by hand** from a list the
+  tool's docs provide; no accounts or API keys.
+- Generation (T17): **laptop only**.
+- Fill on by default: still open (decide after listening).
 
 ### Stage 2 open questions
 1. Is it OK for the tool to *add* sound that was not in the episode
@@ -325,6 +375,10 @@ independent experiments and go ahead only if you want them.
 2. Must everything run locally on this laptop, or is a cloud GPU acceptable
    for generation (T17)?
 3. Should the fill be on by default once it works?
+4. Where should ambience recordings come from? Options: you collect them;
+   or the tool downloads a fixed set of CC0 recordings (e.g. from Freesound,
+   which needs a free account and API key that *you* set up); or a curated
+   pack you download by hand.
 
 ## Later ideas (not planned yet)
 

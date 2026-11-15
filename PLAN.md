@@ -189,7 +189,7 @@ Tags and models follow `CLAUDE.md`: `[hard]` fable/opus, `[medium]` sonnet,
      → T13.
   2. Some background sounds "not really perfect". No timestamps yet. → T14.
 
-### T11 — Never delete a file mux did not create `[medium]` — todo
+### T11 — Never delete a file mux did not create `[medium]` — done
 - Goal: `mux` deletes `out` when ffmpeg fails; if another program created a
   file at that path between the existence check and ffmpeg starting, it would
   be deleted. Write to a temporary name next to `out` and rename on success.
@@ -205,7 +205,7 @@ Tags and models follow `CLAUDE.md`: `[hard]` fable/opus, `[medium]` sonnet,
 - Files: `separate/__init__.py`, `cli.py`, tests.
 - Verify: `pytest`; peak memory for the episode measured before and after.
 
-### T13 — Rescue laughs and shouts the model calls music `[hard]` — todo
+### T13 — Rescue laughs and shouts the model calls music `[hard]` — in progress
 - Goal: non-speech voice sounds (laughs, shouts, gasps) sometimes land in the
   music stem and are removed. Find them and put them back without bringing
   back sung vocals in songs.
@@ -219,6 +219,20 @@ Tags and models follow `CLAUDE.md`: `[hard]` fable/opus, `[medium]` sonnet,
 - Verify: on `output/t9/laugh-2030/` the laugh comes back (you listen); the
   opening song (clip 4) stays removed (level within 3 dB of today's −52 dB);
   speed cost measured.
+- Built: `separate/voice.py` (Demucs htdemucs on the music stem only; frames
+  of 0.1 s; voice moved back where it is 20–30 dB or more above the
+  instruments, smoothly), `--no-voice-rescue`, `separate()` now takes
+  fractional overlap and stem names; `demucs` added to dependencies. 129
+  tests pass. Experiment: `experiments/voice_rescue.py`.
+- Measured on the full episode (`output/t13/episode/`): laugh at 20:30
+  −20.7 dB (original −20.6, before −61.7), its tail −23.9 (original −23.8,
+  before −55.9); opening song −52.4 dB (unchanged); sound added back in only
+  26 of 1451 seconds. Run time 7:06 instead of 5:45 (+1:21).
+- Side effect: ~10 short moments of the ending song came back quietly
+  (−30 to −48 dB, original −27) at 22:10–22:17, 22:27, 23:34 — probably
+  moments where the singer is briefly alone. Before/after files:
+  `output/t13/compare/`.
+- Waiting for: you to listen (laugh, and whether the ending leak bothers you).
 
 ### T14 — Background sounds that are "not really perfect" `[hard]` — todo
 - Goal: find out what is wrong and whether it can be fixed.
@@ -233,6 +247,84 @@ Tags and models follow `CLAUDE.md`: `[hard]` fable/opus, `[medium]` sonnet,
   fragdirector).
 - Files: `README.md`, `CONTRIBUTING.md`.
 - Verify: following the README on this machine works.
+
+## Stage 2 — Fill the gaps the music leaves (approved 2026-11-15)
+
+Goal: in scenes where music was the only background, removing it leaves an
+unnaturally empty sound. Stage 2 fills those gaps with fitting background
+sound (room tone, wind, crowd, street, nature) so the episode still feels
+alive — without bringing music back.
+
+Approach, cheapest and safest first:
+
+1. **Find the gaps.** Places where the removed music was the main
+   non-speech sound and the kept effects/ambience are very quiet.
+2. **Reuse the episode's own ambience.** For each gap, take quiet,
+   speech-free background sound from the *same scene* (scene cuts detected
+   from the video), and extend it into the gap with crossfaded, varied
+   repeats. It sounds like the show itself and needs no new large model.
+3. **Optionally, generate it.** Video-to-audio ("Foley") models can create
+   sound from the picture. The well-known ones need 8–20 GB of GPU memory;
+   whether any usable one runs on a 4 GB card is unknown and must be measured
+   before anything is built on it.
+4. **Optionally, a sound library.** You supply a folder of ambience
+   recordings (e.g. CC0 sounds); a sound-tagging model (e.g. PANNs, 527
+   AudioSet classes) picks a matching one for each gap.
+
+Order: T15 → T16 → T19 give a complete, local feature. T17 and T18 are
+independent experiments and go ahead only if you want them.
+
+### T15 — Find the gaps `[hard]` — todo
+- Goal: list every stretch (≥ 2 s) where, after music removal, the
+  non-speech background is much quieter than it was with music (thresholds
+  measured, not guessed), plus video scene cuts (`ffmpeg` scene detection).
+- Files: `src/musicremover/gaps.py` (pure numpy on stems + cut list),
+  `probe.py` or a new `scenes.py` for the cut detection, tests;
+  `experiments/` script to print the gap list for the test episode.
+- Verify: `pytest`; the gap list for Clannad E20, and you listen to three of
+  them to confirm they feel empty.
+
+### T16 — Ambience fill from the episode itself `[hard]` — todo
+- Goal: fill each gap with background sound taken from speech-free, music-
+  free moments of the same scene (effects stem), extended by crossfaded,
+  randomly offset repeats, at a level matched to that scene's own
+  background. Never use material containing speech or music; leave a gap
+  empty if the scene has no usable ambience.
+- Files: `src/musicremover/fill.py`, tests, CLI option `--fill ambience`.
+- Verify: `pytest` (fill never contains speech-stem energy, levels and
+  joins are smooth, gaps without source material stay empty); you watch
+  the test episode with and without fill.
+
+### T17 — Generated background sound: feasibility on 4 GB `[hard]` — todo
+- Goal: measure whether a video-to-audio model can generate usable
+  background sound for gap scenes on this machine: candidates to check
+  include MMAudio (small variants), HunyuanVideo-Foley XL with CPU offload,
+  and newer releases. Record GPU memory, time per 10 s, licence, and
+  whether the output contains music (it must not).
+- Files: `experiments/` only, `docs/generation-choice.md`.
+- Verify: three gap scenes generated (or a written reason why not); you
+  listen and decide go / no-go.
+
+### T18 — Ambience from your own sound library `[medium]` — todo
+- Goal: `--fill library --library DIR`: tag each gap scene's sound (PANNs or
+  similar, licence checked) and pick the closest-matching recording from
+  your folder.
+- Files: `src/musicremover/library.py`, tests.
+- Verify: `pytest` with a tiny generated library; by hand on the episode.
+
+### T19 — Fill options and docs `[medium]` — todo
+- Goal: `--fill {none,ambience,library,generate}` (default decided after
+  you listen), `--fill-level DB`, README section.
+- Files: `cli.py`, `README.md`, tests.
+- Verify: `pytest`; README examples run.
+
+### Stage 2 open questions
+1. Is it OK for the tool to *add* sound that was not in the episode
+   (generated or from a library), or should it only reuse the episode's own
+   sound?
+2. Must everything run locally on this laptop, or is a cloud GPU acceptable
+   for generation (T17)?
+3. Should the fill be on by default once it works?
 
 ## Later ideas (not planned yet)
 

@@ -194,3 +194,28 @@ def test_keep_bad_value_exits_2(src, capsys):
         main([str(src), "--keep", "banana"], factory)
     assert e.value.code == 2
     assert "banana" in capsys.readouterr().err
+
+
+class FakeVoice:
+    """Calls the whole music stem a lone voice, so all of it is rescued."""
+
+    sample_rate = 48000
+    chunk_size = 4800
+
+    def separate_chunk(self, chunk):
+        return np.stack([chunk, np.zeros_like(chunk)])
+
+
+def test_voice_rescue_puts_music_stem_voice_back(src):
+    # fake separator: speech 0.5x, music 0.5x; rescuing all music gives ~1.0x
+    assert main([str(src)], factory, lambda device: FakeVoice()) == 0
+    out, orig = _decode(src.parent / "Episode 01.nomusic.mkv"), _decode(src)
+    n = min(len(out), len(orig))
+    assert abs(20 * np.log10(_rms(out[4800:n - 4800]) / _rms(orig[4800:n - 4800]))) < 1.0
+
+
+def test_no_voice_rescue_skips_the_voice_backend(src):
+    def boom(device):
+        raise AssertionError("voice backend must not be built")
+
+    assert main([str(src), "--no-voice-rescue"], factory, boom) == 0

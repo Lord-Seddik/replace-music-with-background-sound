@@ -13,6 +13,7 @@ dependencies = [
     "torch",
     "torchaudio",
     "einops",
+    "demucs>=4.0",
 ]
 
 [project.optional-dependencies]

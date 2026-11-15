@@ -17,6 +17,7 @@ from .mux import mux
 from .probe import ProbeError, choose_track, probe
 from .separate import separate
 from .separate.bandit import WEIGHTS_URL, BanditV2
+from .separate.voice import DemucsVoice, rescue_voices
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".mov", ".webm"}
 SAMPLE_RATE = 48000
@@ -46,6 +47,9 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="leave this part of the soundtrack original (repeatable), "
                         "e.g. --keep 0:00-1:30 --keep 22:10-end")
     p.add_argument("--keep-original", action="store_true", help="also keep the original audio tracks")
+    p.add_argument("--no-voice-rescue", action="store_true",
+                   help="skip the second pass that puts back laughs and shouts the model took for music"
+                        " (saves about 1.5 min per episode)")
     p.add_argument("--quality", choices=("normal", "high"), default="normal",
                    help="high is about twice as slow")
     p.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
@@ -114,7 +118,7 @@ class _Line:
         self.width = 0
 
 
-def _process(src: Path, out: Path, args: argparse.Namespace, separator, tag: str) -> None:
+def _process(src: Path, out: Path, args: argparse.Namespace, separator, voice, tag: str) -> None:
     line = _Line()
     prefix = f"{tag} {src.name}"
     start = time.monotonic()
@@ -130,16 +134,20 @@ def _process(src: Path, out: Path, args: argparse.Namespace, separator, tag: str
             audio = np.ascontiguousarray(data.T)
             del data
 
-            t0 = time.monotonic()
+            def progress(stage: str):
+                t0 = time.monotonic()
 
-            def progress(done: int, total: int) -> None:
-                elapsed = time.monotonic() - t0
-                eta = elapsed / done * (total - done) if done else 0.0
-                line.show(f"{prefix}  separating {100 * done // total}%  eta {_fmt_time(eta)}")
+                def show(done: int, total: int) -> None:
+                    elapsed = time.monotonic() - t0
+                    eta = elapsed / done * (total - done) if done else 0.0
+                    line.show(f"{prefix}  {stage} {100 * done // total}%  eta {_fmt_time(eta)}")
+                return show
 
             stems = separate(separator, audio,
                              overlap=2 if args.quality == "normal" else 4,
-                             progress=progress)
+                             progress=progress("separating"))
+            if voice is not None:
+                stems = rescue_voices(stems, voice, progress=progress("rescuing voices"))
             line.show(f"{prefix}  mixing")
             mixed = mix(stems, music_gain_db=args.music_gain, sample_rate=SAMPLE_RATE)
             del stems
@@ -160,7 +168,9 @@ def _process(src: Path, out: Path, args: argparse.Namespace, separator, tag: str
         raise
 
 
-def main(argv: list[str] | None = None, separator_factory=None) -> int:
+def main(argv: list[str] | None = None, separator_factory=None, voice_factory=None) -> int:
+    """Run the command. Tests inject fake backends; a fake separator without a
+    fake voice backend means no voice rescue (so tests never load Demucs)."""
     args = _build_parser().parse_args(argv)
     if args.music_gain is not None and args.music_gain > 0:
         print("error: --music-gain must be 0 or negative", file=sys.stderr)
@@ -194,13 +204,20 @@ def main(argv: list[str] | None = None, separator_factory=None) -> int:
               f"or pass --weights PATH / set MUSICREMOVER_WEIGHTS.", file=sys.stderr)
         return 2
 
-    separator = None
+    if args.no_voice_rescue or (separator_factory is not None and voice_factory is None):
+        voice_factory = None
+    elif voice_factory is None:
+        voice_factory = DemucsVoice
+
+    separator = voice = None
     try:
         for i, (src, out) in enumerate(jobs, 1):
             try:
                 if separator is None:
                     separator = (separator_factory or BanditV2)(weights, args.device)
-                _process(src, out, args, separator, f"[{i}/{len(jobs)}]")
+                if voice is None and voice_factory is not None:
+                    voice = voice_factory(args.device)
+                _process(src, out, args, separator, voice, f"[{i}/{len(jobs)}]")
             except (ProbeError, RuntimeError, OSError, ValueError) as exc:
                 print(f"failed: {src}: {exc}", file=sys.stderr)
                 failed += 1

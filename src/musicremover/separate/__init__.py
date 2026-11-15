@@ -27,15 +27,17 @@ class Separator(Protocol):
 def separate(
     separator: Separator,
     audio: np.ndarray,
-    overlap: int = 2,
+    overlap: float = 2,
     progress: Callable[[int, int], None] | None = None,
+    names: tuple[str, ...] = STEMS,
 ) -> Stems:
-    """Separate `audio` (channels, samples) into STEMS, each the same shape as `audio`.
+    """Separate `audio` (channels, samples) into `names`, each the same shape as `audio`.
 
-    Chunks start every chunk_size / overlap samples. Each chunk is weighted by
-    a Hann window and the sum is divided by the summed weights, so the joins
-    are seamless whatever the backend returns. The input is zero-padded so
-    that every real sample is covered by `overlap` chunks.
+    Chunks start every chunk_size / overlap samples (overlap may be a fraction
+    such as 1.1, for a short crossfade between otherwise separate chunks).
+    Each chunk is weighted by a Hann window and the sum is divided by the
+    summed weights, so the joins are seamless whatever the backend returns.
+    The input is zero-padded so that every real sample is covered.
     """
     if audio.ndim != 2:
         raise ValueError(f"audio must be (channels, samples), got shape {audio.shape}")
@@ -43,7 +45,7 @@ def separate(
         raise ValueError("overlap must be at least 1")
     channels, length = audio.shape
     size = separator.chunk_size
-    hop = size // overlap
+    hop = max(1, int(size / overlap))
     pad = size - hop
 
     count = max(1, -(-(length + pad) // hop))  # chunks needed to cover pad + audio
@@ -52,17 +54,17 @@ def separate(
     padded[:, pad:pad + length] = audio
 
     window = np.hanning(size + 2)[1:-1].astype(np.float32) if overlap > 1 else np.ones(size, np.float32)
-    out = np.zeros((len(STEMS), channels, padded_length), dtype=np.float32)
+    out = np.zeros((len(names), channels, padded_length), dtype=np.float32)
     weight = np.zeros(padded_length, dtype=np.float32)
     for k in range(count):
         start = k * hop
         estimate = separator.separate_chunk(padded[:, start:start + size])
-        if estimate.shape != (len(STEMS), channels, size):
-            raise RuntimeError(f"backend returned shape {estimate.shape}, expected {(len(STEMS), channels, size)}")
+        if estimate.shape != (len(names), channels, size):
+            raise RuntimeError(f"backend returned shape {estimate.shape}, expected {(len(names), channels, size)}")
         out[:, :, start:start + size] += estimate * window
         weight[start:start + size] += window
         if progress:
             progress(k + 1, count)
 
     out = out[:, :, pad:pad + length] / weight[pad:pad + length]
-    return {name: out[i] for i, name in enumerate(STEMS)}
+    return {name: out[i] for i, name in enumerate(names)}

@@ -798,20 +798,49 @@ into two tasks that can each be checked on their own (agreed 2026-11-16):
   all wrong one". Left: sometimes it "feels inside" when the scene is
   outdoors — the space (closed room vs open air) does not match. → T25.
 
-### T25 — Neutral bed that matches indoors vs outdoors `[hard]` — todo (proposed)
+### T25 — Neutral bed that matches the space `[hard]` — done
 - Goal: the one neutral bed is a house room tone, so outdoor shots without
-  a confident scene sound like a closed room. Split it: `neutral_indoor`
-  (room tone) and `neutral_outdoor` (soft open air, distant town), chosen
-  per piece by an indoor/outdoor decision from the same SigLIP stills
-  ("indoors" vs "outdoors" prompts, plus brightness for night), and close-
-  ups take the space of their neighbours as scenes do now.
-- Work: add indoor/outdoor to the eye labels (`experiments/t23_truth.py`),
-  measure how often SigLIP gets the space right, choose the rule; pick one
-  or two CC0 open-air recordings; keep `neutral` working as the fallback
-  for either.
+  a confident scene sound like a closed room. You asked for more than two
+  options. Spaces: `room` (small indoor), `hall` (large indoor: classroom,
+  corridor, library, shop, hospital), `town` (outdoors, built-up, day),
+  `nature` (outdoors, open/green, day; snow too), `night` (outdoors at
+  night). Folders `neutral_room`, `neutral_hall`, … ; a missing one falls
+  back to `neutral`, then to empty.
+- Space decision: sum SigLIP's scene shares per space (so an unsure scene
+  still gives a sure space), dark stills turn outdoor into `night`;
+  close-ups borrow from neighbours as scenes do.
+- Work: add the space to the eye labels, measure space accuracy, choose the
+  rule; pick soft CC0 beds per space.
 - Files: `library.py`, tests, README, `samples/ambience/neutral_*`.
-- Verify: `pytest`; indoor/outdoor accuracy on the 180 pieces; share of
-  neutral fill with the wrong space before vs after; you listen.
+- Verify: `pytest`; space accuracy on the 180 pieces (indoor/outdoor mix-
+  ups counted apart from room/hall ones); share of neutral fill in the
+  wrong space before vs after; you listen.
+- Measured first (`experiments/t25_sim.py`, cached logits): one room bed
+  for every piece puts 330 s in the wrong indoor/outdoor space; summing
+  scene shares per space: 58 s. Remaining mix-ups were homes judged "hall"
+  (the bakery read as a shop → `shop` moved to `room`) and lit night
+  streets judged day (fixed by a night/day prompt pair scored in the same
+  SigLIP call; brightness < 0.3 kept as a backup): right space 526 s,
+  near 70 s, wrong in/out 58 s.
+- Built: `scenes.label_scenes(day_night=True)` (two extra texts compared
+  only with each other; `SceneLabel.shares`, `.night`); `library.py`
+  `SPACE_OF`, `space_of`, `neutral_bed` (`neutral_<space>` → `neutral` →
+  empty); `neutral_*` folders are never scene choices. README table.
+  Tests: 4 new; 255 pass.
+- Beds (BigSoundBank CC0, `samples/ambience/`): `neutral_room` ← 2458
+  (house), `neutral_hall` ← 2562 (Hall des Capucins), `neutral_town` ←
+  2457 (city garden), `neutral_nature` ← 1097 (wind in a cornfield),
+  `neutral_night` ← 1469 (night insects, wind); `neutral` stays 2458.
+- Real code on the eye labels (`experiments/t25_check.py`): under the
+  neutral bed (255 s), right space 85 → 186 s, indoor/outdoor wrong
+  109 → 25 s; wrong scene sound unchanged (71 of 691 s).
+- Episode run (`output/t25/run/`, 11:41): same song skips; ambience under
+  11:20 in 86 places, 4:21 of it neutral beds. Clips in
+  `output/t25/listen/`: the 11 T23 spots as `_0_original`,
+  `_1_fill-before` (T23 run, one room bed) and `_2_fill-now`.
+- Waiting for: you to listen, mainly 8 school library, 9 corridor (hall
+  bed), 10 snow (nature bed), and say whether the space now feels right.
+- Your answer (2026-11-16): "Yes, commit and push" — space feels right.
 
 ### T24 — Drop-files window `[medium]` — done (waiting for you to try it)
 - Goal: a small window for use without a terminal: drop video files (or a
@@ -838,8 +867,15 @@ into two tasks that can each be checked on their own (agreed 2026-11-16):
   command it builds ran a 25 s clip on CPU with progress parsed; shortcut
   script writes a .lnk (tested in a temp folder).
 - Left for you: drag files onto it with the mouse, the look, Browse
-  dialogs, Cancel and error pop-ups, double-click the desktop shortcut
-  (`powershell -File scripts/make_shortcut.ps1` makes it).
+  dialogs, Cancel and error pop-ups, double-click the desktop shortcut.
+- Launch fix (2026-11-16, Sonnet agent, after your paste): Windows blocks
+  `.ps1` scripts (execution policy, left unchanged), and the exe path was
+  relative to the wrong folder. Now: double-click `Music Remover.cmd` in
+  the project folder (works from anywhere); `scripts/make_shortcut.py`
+  (standard library, run with the venv's python) makes the desktop
+  shortcut; `make_shortcut.ps1` removed. README "Using the window" updated.
+  Checked: .lnk target/working folder/icon read back (written to a temp
+  folder), launcher started the window from `scripts\` and `C:\`.
 - Known: a cancelled job leaves its `musicremover-*` temp folder in
   %TEMP%; no device/quality options in the window.
 

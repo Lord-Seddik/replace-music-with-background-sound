@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, Sequence
 
@@ -118,6 +118,13 @@ class SceneLabel:
     score: float      # share of the match given to `label` among all labels (0-1)
     runner_up: str
     runner_up_score: float
+    shares: dict[str, float] = field(default_factory=dict, compare=False)  # every label's share
+    night: bool | None = None  # with `day_night`: the stills look like night rather than day
+
+
+# Asked alongside the scenes when `label_scenes(day_night=True)`; compared with each
+# other only (T25: right for lit night streets where brightness alone was not).
+NIGHT_TEXT, DAY_TEXT = "a scene at night, in the dark", "a scene in daytime, in daylight"
 
 
 def label_scenes(
@@ -125,11 +132,14 @@ def label_scenes(
     model: SceneModel,
     scenes: dict[str, str] = DEFAULT_SCENES,
     prompt: str = PROMPT,
+    day_night: bool = False,
 ) -> list[SceneLabel]:
     """One label per group of stills (a group = the stills of one gap piece).
 
     The model is run once over all stills; a group's logits are averaged over
     its stills, so one odd frame (a close-up, a fade) does not decide alone.
+    With `day_night`, two more descriptions (night / day) are scored in the same
+    call and compared only with each other, filling `SceneLabel.night`.
     """
     if len(scenes) < 2:
         raise ValueError("need at least two scene types to choose between")
@@ -139,16 +149,22 @@ def label_scenes(
     flat = [img for group in stills for img in group]
     if not flat:
         return []
-    logits = np.asarray(model.scores(flat, [prompt.format(scenes[n]) for n in names]), np.float64)
+    texts = [prompt.format(scenes[n]) for n in names]
+    if day_night:
+        texts += [prompt.format(NIGHT_TEXT), prompt.format(DAY_TEXT)]
+    logits = np.asarray(model.scores(flat, texts), np.float64)
     out, i = [], 0
     for group in stills:
         mean = logits[i:i + len(group)].mean(axis=0)
         i += len(group)
+        night = bool(mean[len(names)] > mean[len(names) + 1]) if day_night else None
+        mean = mean[:len(names)]
         share = np.exp(mean - mean.max())
         share /= share.sum()
         best, second = np.argsort(share)[::-1][:2]
         out.append(SceneLabel(names[best], round(float(share[best]), 3),
-                              names[second], round(float(share[second]), 3)))
+                              names[second], round(float(share[second]), 3),
+                              {n: float(v) for n, v in zip(names, share)}, night))
     return out
 
 

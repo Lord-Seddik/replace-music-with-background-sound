@@ -8,11 +8,11 @@ import soundfile as sf
 
 from musicremover.gaps import Gap, frame_levels
 from musicremover.library import (
-    DARK, LABEL_ONLY, LEVEL_RANGE_DB, MIN_SCORE, NEUTRAL, Library, Placement, choose_scene, excerpt,
+    DARK, LABEL_ONLY, LEVEL_RANGE_DB, MIN_SCORE, NEUTRAL, Library, Placement, choose_scene, excerpt, neutral_bed, space_of,
     fill_level, load_library, make_fill, plan_fill, read_recording, render_fill, split_songs,
     subtract_ranges,
 )
-from musicremover.scenes import CLOSE_UP, DEFAULT_SCENES, SceneLabel
+from musicremover.scenes import CLOSE_UP, DEFAULT_SCENES, SceneLabel, label_scenes
 
 RATE = 8000
 
@@ -123,6 +123,53 @@ def test_choose_scene_keeps_quiet_rooms_even_when_unsure(tmp_path):
     sf.write(d / "a.wav", noise(2, channels=1).T, RATE)
     lib = load_library(tmp_path / "lib")
     assert choose_scene(label("bedroom", 0.2), 0.1, lib) == "bedroom"
+
+
+def shares_label(shares, night=None):
+    best = max(shares, key=shares.get)
+    return SceneLabel(best, shares[best], "x", 0.0, shares, night)
+
+
+def test_space_of_sums_the_scenes_of_each_space():
+    # no single room scene wins, but rooms together do
+    lb = shares_label({"bedroom": 0.2, "kitchen": 0.2, "living_room": 0.15, "park": 0.3, "classroom": 0.15})
+    assert space_of(lb, 0.6) == "room"
+    assert space_of(shares_label({"park": 0.5, "forest": 0.3, "classroom": 0.2}), 0.6) == "nature"
+    assert space_of(shares_label({"temple_yard": 1.0}), 0.6) is None
+
+
+def test_space_of_turns_outdoors_into_night():
+    town = {"quiet_street": 0.7, "bedroom": 0.3}
+    assert space_of(shares_label(town, night=False), 0.6) == "town"
+    assert space_of(shares_label(town, night=True), 0.6) == "night"
+    assert space_of(shares_label(town, night=False), DARK - 0.01) == "night"
+    assert space_of(shares_label({"bedroom": 0.9, "park": 0.1}, night=True), 0.1) == "room"  # rooms stay rooms
+
+
+def test_neutral_bed_prefers_the_space_folder(tmp_path):
+    for name in ("park", NEUTRAL, f"{NEUTRAL}_town"):
+        d = tmp_path / "lib" / name
+        d.mkdir(parents=True)
+        sf.write(d / "a.wav", noise(2, channels=1).T, RATE)
+    lib = load_library(tmp_path / "lib")
+    assert neutral_bed("town", lib) == f"{NEUTRAL}_town"
+    assert neutral_bed("room", lib) == NEUTRAL
+    assert neutral_bed(None, lib) == NEUTRAL
+    assert f"{NEUTRAL}_town" not in lib.scenes() and NEUTRAL not in lib.scenes()
+    assert choose_scene(label(f"{NEUTRAL}_town"), 0.6, lib) == NEUTRAL  # never a scene of its own
+
+
+def test_label_scenes_day_night_does_not_change_the_scene_shares():
+    class Model:
+        def scores(self, images, texts):
+            base = [3.0 if "park" in t else 0.0 for t in texts]
+            return np.array([[*base[:-2], 2.0, 1.0] if len(texts) > 2 and "night" in texts[-2] else base
+                             for _ in images])
+    scenes = {"park": "a park", "beach": "a beach by the sea"}
+    plain = label_scenes([[np.zeros((4, 4, 3), np.uint8)]], Model(), scenes)[0]
+    both = label_scenes([[np.zeros((4, 4, 3), np.uint8)]], Model(), scenes, day_night=True)[0]
+    assert (plain.label, plain.score) == (both.label, both.score) and plain.night is None
+    assert both.night is True and abs(sum(both.shares.values()) - 1) < 1e-9
 
 
 def test_render_fill_steady_avoids_a_loud_event(tmp_path):

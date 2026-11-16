@@ -187,7 +187,7 @@ def _convert(src: Path, out: Path, args: argparse.Namespace, separator, voice, t
             fill.delete()
             del fill
         filled = sum(p.end - p.start for p in report.placements)
-        neutral = sum(p.end - p.start for p in report.placements if p.scene == NEUTRAL)
+        neutral = sum(p.end - p.start for p in report.placements if p.scene.startswith(NEUTRAL))
         notes.append(f"  ambience laid under {_fmt_time(filled)} in {len(report.placements)} place{'s' if len(report.placements) != 1 else ''}"
                      + (f" ({_fmt_time(neutral)} of it the neutral bed)" if neutral else "")
                      + (f"; {len(report.unfilled)} stretches left empty (scene unsure or not visible)"

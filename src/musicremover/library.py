@@ -57,6 +57,20 @@ LABEL_ONLY: dict[str, str] = {
 }
 STEADY_TRIES = 8            # excerpt offsets tried per placement; the steadiest is used
 
+# The neutral bed matches the kind of space (T25): `neutral_<space>` folders, falling
+# back to `neutral`. The space is the one whose scenes together get the largest share
+# of the model's match, so an unsure scene still gives a sure space; outdoor spaces
+# become `night` on night shots. On Clannad E20 (eye labels) this cut indoor/outdoor
+# mix-ups under the neutral bed from 330 s to 58 s.
+SPACES = ("room", "hall", "town", "nature", "night")
+OUTDOOR_SPACES = frozenset({"town", "nature", "night"})
+SPACE_OF: dict[str, str] = {
+    "bedroom": "room", "kitchen": "room", "living_room": "room", "shop": "room",
+    "classroom": "hall", "school_corridor": "hall", "hospital": "hall", "workplace": "hall", "train": "hall",
+    "city_street": "town", "quiet_street": "town", "schoolyard": "town", "night_street": "night",
+    "park": "nature", "countryside": "nature", "forest": "nature", "beach": "nature", "snow": "nature",
+}
+
 
 @dataclass(frozen=True)
 class Library:
@@ -69,9 +83,37 @@ class Library:
         label-only choices, the library's own folder names, and `close_up`."""
         out = dict(DEFAULT_SCENES) | LABEL_ONLY
         for n in self.sounds:
-            if n != NEUTRAL and n not in out:
+            if not _is_neutral(n) and n not in out:
                 out[n] = "a " + n.replace("_", " ").replace("-", " ")
         return out
+
+
+def _is_neutral(name: str) -> bool:
+    return name == NEUTRAL or name.startswith(NEUTRAL + "_")
+
+
+def space_of(label: SceneLabel, brightness: float) -> str | None:
+    """The kind of space a piece shows (one of SPACES), None when no scene type
+    with a known space gets any share (e.g. only custom folder names)."""
+    sums: dict[str, float] = {}
+    for name, share in label.shares.items():
+        s = SPACE_OF.get(name)
+        if s:
+            sums[s] = sums.get(s, 0.0) + share
+    if not sums:
+        return None
+    space = max(sums, key=sums.get)
+    if space in OUTDOOR_SPACES and (label.night or brightness < DARK):
+        space = "night"
+    return space
+
+
+def neutral_bed(space: str | None, library: Library) -> str:
+    """The neutral folder for a space: `neutral_<space>`, else `neutral` (which may
+    be missing from the library: then the piece stays empty)."""
+    if space and f"{NEUTRAL}_{space}" in library.sounds:
+        return f"{NEUTRAL}_{space}"
+    return NEUTRAL
 
 
 def choose_scene(label: SceneLabel, brightness: float, library: Library) -> str:
@@ -80,7 +122,7 @@ def choose_scene(label: SceneLabel, brightness: float, library: Library) -> str:
     name = label.label
     if name == CLOSE_UP:
         return CLOSE_UP
-    if name == NEUTRAL or name not in library.sounds:
+    if _is_neutral(name) or name not in library.sounds:
         return NEUTRAL
     if name not in QUIET_SCENES and label.score < MIN_SCORE:
         return NEUTRAL
@@ -448,13 +490,16 @@ def make_fill(
     progress("labelling scenes")
     if not hasattr(model, "scores"):
         model = model()
-    labels = label_scenes(stills, model, library.scenes())
+    labels = label_scenes(stills, model, library.scenes(), day_night=True)
     brightness = [float(np.mean([s.mean() for s in group])) / 255 for group in stills]
-    chosen = [choose_scene(lb, b, library) for lb, b in zip(labels, brightness)]
+    chosen = []
+    for lb, b in zip(labels, brightness):
+        scene = choose_scene(lb, b, library)
+        chosen.append(neutral_bed(space_of(lb, b), library) if scene == NEUTRAL else scene)
     report.placements, report.unfilled = plan_fill(pieces, chosen)
-    if NEUTRAL not in library.sounds:  # no neutral bed: leave the unsure pieces empty
-        report.unfilled += [Gap(p.start, p.end, 0.0, 0.0) for p in report.placements if p.scene == NEUTRAL]
-        report.placements = [p for p in report.placements if p.scene != NEUTRAL]
+    # a neutral bed the library does not have: leave those pieces empty
+    report.unfilled += [Gap(p.start, p.end, 0.0, 0.0) for p in report.placements if p.scene not in library.sounds]
+    report.placements = [p for p in report.placements if p.scene in library.sounds]
     if not report.placements:
         return None, report
     progress("laying ambience")

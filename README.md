@@ -119,9 +119,21 @@ The picture model always chooses among all the scene types below, whether you
 have a folder for them or not, so a classroom is not mistaken for the nearest
 scene you do have. When the scene has no folder, when the model is unsure of a
 distinctive scene (anything but a room), or when a daytime outdoor sound would
-land on a night shot, the tool uses the **`neutral`** folder instead: put one
-or two very soft room-tone or air recordings in it. Without a `neutral`
-folder those stretches stay empty. Each recording is cut where it is
+land on a night shot, the tool uses a soft **neutral** bed instead, matched to
+the kind of space the picture shows:
+
+| Folder | Space | Good recordings |
+|---|---|---|
+| `neutral_room` | small room (home, small shop) | house room tone |
+| `neutral_hall` | large indoor (classroom, corridor, library) | a quiet hall |
+| `neutral_town` | outdoors, built-up, daytime | a city garden, distant town |
+| `neutral_nature` | outdoors, open or green, daytime (snow too) | soft wind in grass |
+| `neutral_night` | outdoors at night | night air, faint insects |
+| `neutral` | anything a missing folder above would have used | room tone |
+
+The space is decided even when the exact scene is not (all room scenes
+together against all outdoor ones, and a day-or-night check). Without any
+matching neutral folder those stretches stay empty. Each recording is cut where it is
 steadiest, to avoid a shout or a horn in it. These folder names have a tuned
 description for the picture model:
 `classroom`, `school_corridor`, `schoolyard`, `city_street`, `quiet_street`,
@@ -157,15 +169,29 @@ that they contain no music or clear talking:
 ## Using the window
 
 If you would rather not use a terminal, there is a small window that runs the
-same command for you. Start it with `music-remover-gui` (installed with the
-project), or make a desktop shortcut once:
+same command for you.
+
+**Easiest: double-click.** Open the project folder in File Explorer and
+double-click `Music Remover.cmd`. The window opens (a black box may flash for
+a second). For a desktop icon, right-click `Music Remover.cmd`, choose
+"Show more options", then "Send to" and "Desktop (create shortcut)".
+
+**From PowerShell** (works from any folder, nothing to change in PowerShell's
+settings; copy the line as it is):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts\make_shortcut.ps1
+& "C:\Users\DZ Laptops\Documents\PROJECTS\music-remover\.venv\Scripts\music-remover-gui.exe"
 ```
 
-(`-OutDir FOLDER` puts the shortcut somewhere else.) The shortcut starts
-`.venv\Scripts\music-remover-gui.exe` without a console window.
+**Desktop shortcut with an icon** (once, from any folder):
+
+```powershell
+& "C:\Users\DZ Laptops\Documents\PROJECTS\music-remover\.venv\Scripts\python.exe" "C:\Users\DZ Laptops\Documents\PROJECTS\music-remover\scripts\make_shortcut.py"
+```
+
+It puts "Music remover" on your Desktop (`--out-dir FOLDER` puts it somewhere
+else). Do not run `.ps1` scripts here: Windows blocks them by default, and the
+steps above do not need them.
 
 - Drop video files or a folder on the window (or use "Add files..." and "Add
   folder...").

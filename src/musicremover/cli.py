@@ -2,26 +2,30 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
 import soundfile as sf
 
-from .extract import extract
-from .mix import keep_ranges, mix, parse_range
+from .extract import WavArray, extract
+from .library import add_fill, load_library, make_fill
+from .mix import keep_blocks, mix_blocks, parse_range
 from .mux import mux
 from .probe import ProbeError, choose_track, probe
-from .separate import separate
+from .separate import STEMS, FileArray, disk_stems, separate
 from .separate.bandit import WEIGHTS_URL, BanditV2
 from .separate.voice import DemucsVoice, rescue_voices
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".m4v", ".mov", ".webm"}
 SAMPLE_RATE = 48000
-DEFAULT_CACHE_WEIGHTS = Path.home() / ".cache" / "music-remover" / "checkpoint-multi.ckpt"
+FILL_LEVEL_LIMIT_DB = 20
+DEFAULT_CACHE_WEIGHTS =Path.home() / ".cache" / "music-remover" / "checkpoint-multi.ckpt"
 
 
 def _range_arg(text: str) -> tuple[float, float]:
@@ -50,6 +54,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-voice-rescue", action="store_true",
                    help="skip the second pass that puts back laughs and shouts the model took for music"
                         " (saves about 1.5 min per episode)")
+    p.add_argument("--fill", choices=("none", "library"), default="none",
+                   help="library: lay matching ambience from --library under the stretches the "
+                        "removed music leaves empty (default: none)")
+    p.add_argument("--library", type=Path, metavar="DIR",
+                   help="ambience library for --fill library: one sub-folder per scene type "
+                        "(classroom, night_street, park, ...) holding music-free recordings")
+    p.add_argument("--fill-level", type=float, default=0.0, metavar="DB",
+                   help="make the fill DB louder (positive) or quieter (negative) than its default "
+                        "level, between -%d and %d (default: 0); only with --fill library"
+                        % (FILL_LEVEL_LIMIT_DB, FILL_LEVEL_LIMIT_DB))
     p.add_argument("--quality", choices=("normal", "high"), default="normal",
                    help="high is about twice as slow")
     p.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
@@ -99,6 +113,16 @@ def _fmt_time(seconds: float) -> str:
     return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
+_BLOCK = 1 << 20  # frames per read/write step
+
+
+def _write_wav(path: Path, blocks, channels: int) -> None:
+    """(position, float32 (channels, n) block) pairs in order -> 32-bit float WAV."""
+    with sf.SoundFile(path, "w", SAMPLE_RATE, channels, subtype="FLOAT", format="WAV") as f:
+        for _, block in blocks:
+            f.write(np.ascontiguousarray(block.T))
+
+
 class _Line:
     """One updating status line on stderr."""
 
@@ -118,7 +142,78 @@ class _Line:
         self.width = 0
 
 
-def _process(src: Path, out: Path, args: argparse.Namespace, separator, voice, tag: str) -> None:
+def _convert(src: Path, out: Path, args: argparse.Namespace, separator, voice, track, tmp_dir: Path,
+             line: _Line, prefix: str, library, scene_model) -> list[str]:
+    """Everything between probing and the finished file; returns the notes to print.
+
+    Kept apart from `_process` so that all the big arrays are locals of a frame that has
+    finished by the time the scratch folder is removed (see `_forget_arrays`)."""
+    line.show(f"{prefix}  extracting")
+    wav = extract(src, track, tmp_dir / "in.wav", SAMPLE_RATE)
+    audio = WavArray(wav)  # read from the file a slice at a time: no second copy, nothing in memory
+
+    def progress(stage: str):
+        t0 = time.monotonic()
+
+        def show(done: int, total: int) -> None:
+            elapsed = time.monotonic() - t0
+            eta = elapsed / done * (total - done) if done else 0.0
+            line.show(f"{prefix}  {stage} {100 * done // total}%  eta {_fmt_time(eta)}")
+        return show
+
+    # the stems are written to files as they are finished, not held in memory
+    stems = separate(separator, audio,
+                     overlap=2 if args.quality == "normal" else 4,
+                     progress=progress("separating"),
+                     out=disk_stems(tmp_dir, STEMS, audio.shape))
+    if not args.keep:  # only --keep needs the original again: free its disk space
+        audio.close()
+        wav.unlink()
+    if voice is not None:
+        voice_dir = tmp_dir / "voice"
+        voice_dir.mkdir()
+        stems = rescue_voices(stems, voice, progress=progress("rescuing voices"),
+                              out=stems, scratch=voice_dir)  # in place, a block at a time
+    notes = []
+    if library is not None:
+        fill, report = make_fill(stems, SAMPLE_RATE, src, library, scene_model,
+                                 keep=args.keep or (), progress=lambda s: line.show(f"{prefix}  {s}"),
+                                 level_offset_db=args.fill_level,
+                                 allocate=lambda shape: FileArray(tmp_dir / "fill.f32", shape))
+        notes += [f"  not filled (opening/ending song): {_fmt_time(g.start)}-{_fmt_time(g.end)}"
+                  for g in report.songs]
+        if fill is not None:
+            add_fill(stems["effects"], fill)
+            fill.delete()
+            del fill
+        filled = sum(p.end - p.start for p in report.placements)
+        notes.append(f"  ambience laid under {_fmt_time(filled)} in {len(report.placements)} place{'s' if len(report.placements) != 1 else ''}"
+                     + (f"; {len(report.unfilled)} stretches with no visible place left empty"
+                        if report.unfilled else ""))
+    mixed = mix_blocks(stems, music_gain_db=args.music_gain, sample_rate=SAMPLE_RATE)
+    if args.keep:
+        mixed = keep_blocks(mixed, audio, args.keep, SAMPLE_RATE)
+    line.show(f"{prefix}  mixing and writing")
+    new_wav = tmp_dir / "out.wav"
+    _write_wav(new_wav, mixed, audio.shape[0])  # mixed one block at a time as it is written
+    del mixed, stems, audio
+    out.parent.mkdir(parents=True, exist_ok=True)
+    mux(src, new_wav, out, keep_original=args.keep_original, language=track.language)
+    return notes
+
+
+def _forget_arrays(exc_type, exc, tb) -> None:
+    """Exit callback: drop the locals of the frames an in-flight error passed through.
+
+    The stems are memory-mapped files; Windows cannot delete a mapped file, and
+    an error's traceback would keep the arrays (and so the mapping) alive.
+    """
+    if tb is not None:
+        traceback.clear_frames(tb)
+
+
+def _process(src: Path, out: Path, args: argparse.Namespace, separator, voice, tag: str,
+             library=None, scene_model=None) -> None:
     line = _Line()
     prefix = f"{tag} {src.name}"
     start = time.monotonic()
@@ -126,54 +221,48 @@ def _process(src: Path, out: Path, args: argparse.Namespace, separator, voice, t
         line.show(f"{prefix}  probing")
         info = probe(src)
         track = choose_track(info, args.language)
-        with tempfile.TemporaryDirectory(prefix="musicremover-") as tmp:
-            tmp_dir = Path(tmp)
-            line.show(f"{prefix}  extracting")
-            wav = extract(src, track, tmp_dir / "in.wav", SAMPLE_RATE)
-            data, _sr = sf.read(wav, dtype="float32", always_2d=True)
-            audio = np.ascontiguousarray(data.T)
-            del data
-
-            def progress(stage: str):
-                t0 = time.monotonic()
-
-                def show(done: int, total: int) -> None:
-                    elapsed = time.monotonic() - t0
-                    eta = elapsed / done * (total - done) if done else 0.0
-                    line.show(f"{prefix}  {stage} {100 * done // total}%  eta {_fmt_time(eta)}")
-                return show
-
-            stems = separate(separator, audio,
-                             overlap=2 if args.quality == "normal" else 4,
-                             progress=progress("separating"))
-            if voice is not None:
-                stems = rescue_voices(stems, voice, progress=progress("rescuing voices"))
-            line.show(f"{prefix}  mixing")
-            mixed = mix(stems, music_gain_db=args.music_gain, sample_rate=SAMPLE_RATE)
-            del stems
-            if args.keep:
-                mixed = keep_ranges(mixed, audio, args.keep, SAMPLE_RATE)
-            del audio
-            line.show(f"{prefix}  writing")
-            new_wav = tmp_dir / "out.wav"
-            sf.write(new_wav, np.ascontiguousarray(mixed.T), SAMPLE_RATE, subtype="FLOAT")
-            del mixed
-            out.parent.mkdir(parents=True, exist_ok=True)
-            mux(src, new_wav, out, keep_original=args.keep_original, language=track.language)
+        with contextlib.ExitStack() as stack:
+            tmp_dir = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="musicremover-")))
+            stack.push(_forget_arrays)  # exits before the folder is removed
+            notes = _convert(src, out, args, separator, voice, track, tmp_dir, line, prefix,
+                             library, scene_model)
         line.show(f"{prefix}  done")
         line.done()
         print(f"{out}  ({_fmt_time(time.monotonic() - start)})")
+        for n in notes:
+            print(n)
     except BaseException:
         line.done()
         raise
 
 
-def main(argv: list[str] | None = None, separator_factory=None, voice_factory=None) -> int:
+def main(argv: list[str] | None = None, separator_factory=None, voice_factory=None,
+         scene_factory=None) -> int:
     """Run the command. Tests inject fake backends; a fake separator without a
     fake voice backend means no voice rescue (so tests never load Demucs)."""
     args = _build_parser().parse_args(argv)
     if args.music_gain is not None and args.music_gain > 0:
         print("error: --music-gain must be 0 or negative", file=sys.stderr)
+        return 2
+    if not -FILL_LEVEL_LIMIT_DB <= args.fill_level <= FILL_LEVEL_LIMIT_DB:
+        print(f"error: --fill-level must be between -{FILL_LEVEL_LIMIT_DB} and {FILL_LEVEL_LIMIT_DB}",
+              file=sys.stderr)
+        return 2
+    if args.fill_level != 0 and args.fill != "library":
+        print("error: --fill-level is only used with --fill library", file=sys.stderr)
+        return 2
+    library = None
+    if args.fill == "library":
+        if args.library is None:
+            print("error: --fill library needs --library DIR", file=sys.stderr)
+            return 2
+        try:
+            library = load_library(args.library)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    elif args.library is not None:
+        print("error: --library is only used with --fill library", file=sys.stderr)
         return 2
 
     files, errors = _collect(args.inputs)
@@ -209,7 +298,21 @@ def main(argv: list[str] | None = None, separator_factory=None, voice_factory=No
     elif voice_factory is None:
         voice_factory = DemucsVoice
 
-    separator = voice = None
+    separator = voice = scene_model = None
+
+    def get_scene_model():
+        # loaded on first use, after the separator has run; kept for later episodes
+        nonlocal scene_model
+        if scene_model is None:
+            if scene_factory is not None:
+                scene_model = scene_factory(args.device)
+            else:
+                import torch
+                from .scenes import SiglipScenes
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                scene_model = SiglipScenes(args.device)
+        return scene_model
     try:
         for i, (src, out) in enumerate(jobs, 1):
             try:
@@ -217,7 +320,8 @@ def main(argv: list[str] | None = None, separator_factory=None, voice_factory=No
                     separator = (separator_factory or BanditV2)(weights, args.device)
                 if voice is None and voice_factory is not None:
                     voice = voice_factory(args.device)
-                _process(src, out, args, separator, voice, f"[{i}/{len(jobs)}]")
+                _process(src, out, args, separator, voice, f"[{i}/{len(jobs)}]",
+                         library, get_scene_model)
             except (ProbeError, RuntimeError, OSError, ValueError) as exc:
                 print(f"failed: {src}: {exc}", file=sys.stderr)
                 failed += 1

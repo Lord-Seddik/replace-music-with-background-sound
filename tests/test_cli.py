@@ -219,3 +219,57 @@ def test_no_voice_rescue_skips_the_voice_backend(src):
         raise AssertionError("voice backend must not be built")
 
     assert main([str(src), "--no-voice-rescue"], factory, boom) == 0
+
+
+class FakeScenes:
+    """Calls every still a park."""
+
+    def scores(self, images, texts):
+        return np.array([[5.0 if "park" in t else 0.0 for t in texts]] * len(images))
+
+
+@pytest.fixture
+def library(tmp_path):
+    import soundfile as sf
+    d = tmp_path / "lib" / "park"
+    d.mkdir(parents=True)
+    rng = np.random.default_rng(0)
+    sf.write(d / "birds.wav", (0.1 * rng.standard_normal(48000 * 2)).astype(np.float32), 48000)
+    return tmp_path / "lib"
+
+
+def test_fill_library_lays_ambience_under_the_gap(src, library, tmp_path, capsys):
+    # fake separator: the whole clip is music-dominated (effects silent), so it is one gap
+    assert main([str(src), "-o", str(tmp_path / "plain")], factory) == 0
+    assert main([str(src), "-o", str(tmp_path / "fill"), "--fill", "library", "--library", str(library)],
+                factory, scene_factory=lambda device: FakeScenes()) == 0
+    plain = _decode(tmp_path / "plain" / "Episode 01.nomusic.mkv")
+    filled = _decode(tmp_path / "fill" / "Episode 01.nomusic.mkv")
+    n = min(len(plain), len(filled))
+    diff_db = 20 * np.log10(_rms(filled[48000:n - 48000] - plain[48000:n - 48000]))
+    assert -46 < diff_db < -34  # the fill, at about -40 dB
+    assert "ambience laid under 0:03 in 1 place" in capsys.readouterr().out
+
+
+def test_fill_level_shifts_the_fill(src, library, tmp_path):
+    base = ["--fill", "library", "--library", str(library)]
+    assert main([str(src), "-o", str(tmp_path / "plain")], factory) == 0
+    assert main([str(src), "-o", str(tmp_path / "quiet"), *base, "--fill-level", "-6"],
+                factory, scene_factory=lambda device: FakeScenes()) == 0
+    plain = _decode(tmp_path / "plain" / "Episode 01.nomusic.mkv")
+    quiet = _decode(tmp_path / "quiet" / "Episode 01.nomusic.mkv")
+    n = min(len(plain), len(quiet))
+    diff_db = 20 * np.log10(_rms(quiet[48000:n - 48000] - plain[48000:n - 48000]))
+    assert -52 < diff_db < -40  # about -46 dB: 6 dB below the default -40
+
+
+@pytest.mark.parametrize("args, message", [
+    (["--fill-level", "3"], "only used with --fill library"),
+    (["--fill", "library", "--library", "x", "--fill-level", "25"], "between -20 and 20"),
+    (["--fill", "library"], "needs --library"),
+    (["--library", "x"], "only used with --fill library"),
+    (["--fill", "library", "--library", "missing-folder"], "not found"),
+])
+def test_fill_bad_options_exit_2(src, args, message, capsys):
+    assert main([str(src), *args], factory) == 2
+    assert message in capsys.readouterr().err

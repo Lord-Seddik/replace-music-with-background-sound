@@ -10,3 +10,4 @@ experiments/msst/
 *.wav
 *.mkv
 *.mp4
+experiments/t17-venv/

@@ -1,8 +1,10 @@
+import tracemalloc
+
 import numpy as np
 import pytest
 import torch
 
-from musicremover.separate import STEMS, separate
+from musicremover.separate import STEMS, disk_stems, separate
 from musicremover.separate.bandit import match_keys
 
 
@@ -52,6 +54,43 @@ def test_blending_is_smooth_between_chunks():
     stems = separate(Biased(), np.zeros((1, 5000), np.float32), overlap=2)
     steps = np.abs(np.diff(stems["effects"][0]))
     assert steps.max() < 0.01  # a hard seam would jump by 1.0
+
+
+@pytest.mark.parametrize("overlap", [1, 1.1, 2, 4])
+def test_stems_written_to_files_equal_stems_in_memory(tmp_path, overlap):
+    audio = noise(2, 4321)
+    expected = separate(Biased(), audio, overlap=overlap)
+    out = disk_stems(tmp_path, STEMS, audio.shape)
+    result = separate(Biased(), audio, overlap=overlap, out=out)
+    assert result is out
+    for name in STEMS:
+        assert (tmp_path / f"{name}.f32").is_file()
+        np.testing.assert_array_equal(result[name], expected[name])
+
+
+def test_memory_stays_bounded_while_separating_into_files(tmp_path):
+    """Peak allocation is a few chunks, not the length of the soundtrack."""
+    length, chunk = 400_000, 4_000
+    audio = noise(2, length)
+    out = disk_stems(tmp_path, STEMS, audio.shape)
+    tracemalloc.start()
+    try:
+        separate(Fake(chunk), audio, overlap=2, out=out)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 0.05 * 3 * audio.nbytes  # 3 stems in memory would be 3 * audio.nbytes
+    np.testing.assert_allclose(out["speech"], audio, atol=1e-5)
+
+
+def test_out_must_match_the_audio():
+    audio = noise(2, 100)
+    with pytest.raises(ValueError, match="out"):
+        separate(Fake(), audio, out={"speech": np.zeros((2, 100), np.float32)})
+    with pytest.raises(ValueError, match="out"):
+        separate(Fake(), audio, out={n: np.zeros((2, 99), np.float32) for n in STEMS})
+    with pytest.raises(ValueError, match="out"):
+        separate(Fake(), audio, out={n: np.zeros((2, 100)) for n in STEMS})  # float64
 
 
 def test_progress_reports_every_chunk():

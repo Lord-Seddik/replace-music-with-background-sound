@@ -37,8 +37,8 @@ def frame_levels(audio: np.ndarray, sample_rate: int, frame_s: float = FRAME_S) 
     length = audio.shape[1]
     count = max(1, -(-length // frame))
     power = np.zeros(count)
-    for i in range(0, count, 1 << 14):  # blocks keep float64 copies small
-        a, b = i * frame, min(length, (i + (1 << 14)) * frame)
+    for i in range(0, count, 1 << 8):  # blocks keep float64 copies small (about 1.2M samples)
+        a, b = i * frame, min(length, (i + (1 << 8)) * frame)
         block = audio[:, a:b].astype(np.float64)
         n = -(-(b - a) // frame)
         padded = np.zeros((audio.shape[0], n * frame))

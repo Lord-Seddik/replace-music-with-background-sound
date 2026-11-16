@@ -684,6 +684,10 @@ into two tasks that can each be checked on their own (agreed 2026-11-16):
   feel less empty, (2) whether any spot sounds wrong for the picture or too
   loud/quiet (`--fill-level` moves it), (3) whether the fill should be on
   by default (T19 / open question 3).
+- Your listening (2026-11-16): "about 60 % correct, and the correct ones
+  are so good, they don't feel empty", but sometimes a sound that is not
+  neutral and is wrong for the scene is added. The fill stays **optional**
+  (off by default). → T23.
 - CC0 sources found (2026-11-16, for this check and T19's list):
   - **BigSoundBank** (bigsoundbank.com, Joseph Sardin): sounds marked
     "Free and Royalty Free" are CC0; no account, no attribution needed;
@@ -743,6 +747,45 @@ into two tasks that can each be checked on their own (agreed 2026-11-16):
   offering them would be a flag that does nothing; add each choice when its
   task lands. The default stays `none` until you have listened with real
   recordings (T18b "left to verify").
+
+### T23 — Never lay a wrong, distinctive sound `[hard]` — todo (asked for 2026-11-16)
+- Goal: about 40 % of fills sound wrong for the scene. When the tool is
+  not sure of the scene, lay a neutral bed (soft room tone / air) instead
+  of a distinctive recording (playground shouts, waves, insects); and from
+  any recording, prefer steady stretches over ones with loud events.
+- Work: label the gap pieces of Clannad E20 by eye from their stills (my
+  ground truth), compare with SigLIP's labels and scores, choose the
+  confidence rule from that; add a `neutral` library folder (reserved name)
+  used for unsure pieces; pick excerpts by steadiness.
+- Files: `library.py`, `scenes.py` (if the score rule lives there), tests,
+  README (the `neutral` folder), `samples/ambience/neutral/`.
+- Verify: `pytest`; on the episode, share of fill time with a wrong
+  distinctive sound (by my eye labels) before vs after; you listen to the
+  same seven spots.
+
+### T24 — Drop-files window `[medium]` — todo (asked for 2026-11-16)
+- Goal: a small window for use without a terminal: drop video files (or a
+  folder) on it, choose the main options (fill on/off and its library,
+  keep ranges, keep original track), see progress per file, open the
+  output folder at the end. A desktop shortcut starts it.
+- Design: the window runs the existing `music-remover` command as a
+  subprocess and reads its progress line, so the pipeline code is not
+  touched. Drag and drop via `tkinterdnd2` (MIT) on top of tkinter.
+- Files: new `src/musicremover/gui.py`, `pyproject.toml` (a
+  `music-remover-gui` entry point, `tkinterdnd2`), tests for the parts that
+  build the command and parse progress, README section, a script that
+  makes the desktop shortcut.
+- Verify: `pytest`; by hand, a short clip dropped on the window goes
+  through and the output folder opens; you try it once.
+
+### Optional ideas — decided 2026-11-16 (you left it to Claude)
+- `--fill generate` (T17, Stable Audio 3): **not built for now.** It picks
+  its sound from the same scene label, so it would repeat the 40 % wrong
+  scenes; revisit after T23 (e.g. as the neutral bed).
+- Proper 5.1 handling: **not now**; there is no 5.1 sample to check it on.
+- Automatic opening/ending detection: **not now**; the fill already skips
+  the songs, and `--keep` covers keeping them.
+- Merge `feat/first-version` into `main`: **done** (local, not pushed).
 
 ### Stage 2 answers (2026-11-15)
 - Adding sound that was not in the episode: **yes**. The proposed change

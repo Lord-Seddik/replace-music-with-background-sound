@@ -14,7 +14,7 @@ import numpy as np
 import soundfile as sf
 
 from .extract import WavArray, extract
-from .library import add_fill, load_library, make_fill
+from .library import NEUTRAL, add_fill, load_library, make_fill
 from .mix import keep_blocks, mix_blocks, parse_range
 from .mux import mux
 from .probe import ProbeError, choose_track, probe
@@ -187,8 +187,10 @@ def _convert(src: Path, out: Path, args: argparse.Namespace, separator, voice, t
             fill.delete()
             del fill
         filled = sum(p.end - p.start for p in report.placements)
+        neutral = sum(p.end - p.start for p in report.placements if p.scene == NEUTRAL)
         notes.append(f"  ambience laid under {_fmt_time(filled)} in {len(report.placements)} place{'s' if len(report.placements) != 1 else ''}"
-                     + (f"; {len(report.unfilled)} stretches with no visible place left empty"
+                     + (f" ({_fmt_time(neutral)} of it the neutral bed)" if neutral else "")
+                     + (f"; {len(report.unfilled)} stretches left empty (scene unsure or not visible)"
                         if report.unfilled else ""))
     mixed = mix_blocks(stems, music_gain_db=args.music_gain, sample_rate=SAMPLE_RATE)
     if args.keep:

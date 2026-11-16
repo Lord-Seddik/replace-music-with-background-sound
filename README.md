@@ -115,8 +115,15 @@ Ambience/
   park/         birds.wav
 ```
 
-Only the scene types you have a folder for are ever chosen, so start with a
-few. These folder names have a tuned description for the picture model:
+The picture model always chooses among all the scene types below, whether you
+have a folder for them or not, so a classroom is not mistaken for the nearest
+scene you do have. When the scene has no folder, when the model is unsure of a
+distinctive scene (anything but a room), or when a daytime outdoor sound would
+land on a night shot, the tool uses the **`neutral`** folder instead: put one
+or two very soft room-tone or air recordings in it. Without a `neutral`
+folder those stretches stay empty. Each recording is cut where it is
+steadiest, to avoid a shout or a horn in it. These folder names have a tuned
+description for the picture model:
 `classroom`, `school_corridor`, `schoolyard`, `city_street`, `quiet_street`,
 `night_street`, `park`, `countryside`, `forest`, `beach`, `living_room`,
 `bedroom`, `kitchen`, `hospital`, `shop`, `train` and `workplace`. Any other
@@ -146,6 +153,35 @@ that they contain no music or clear talking:
 - **Freesound** (freesound.org): use the licence filter "Creative Commons 0".
   Much larger, including recordings made in Japan. A free account is needed
   to download.
+
+## Using the window
+
+If you would rather not use a terminal, there is a small window that runs the
+same command for you. Start it with `music-remover-gui` (installed with the
+project), or make a desktop shortcut once:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\make_shortcut.ps1
+```
+
+(`-OutDir FOLDER` puts the shortcut somewhere else.) The shortcut starts
+`.venv\Scripts\music-remover-gui.exe` without a console window.
+
+- Drop video files or a folder on the window (or use "Add files..." and "Add
+  folder...").
+- Options: the output folder (empty means next to each video); "Fill the gaps"
+  with the library folder and a level slider (same as `--fill library`,
+  `--library`, `--fill-level`); the parts to leave untouched, written like
+  `0:00-1:30, 22:10-end` (same as `--keep`); and "also keep the original audio
+  track" (`--keep-original`).
+- Press Start. Each file shows its step, percent and time left. Cancel stops the
+  job. Errors are shown in red in the messages box and in a message window.
+- When it finishes, "Open output folder" opens the folder with the results.
+
+The window needs the model weights in the same places as the command (see
+above). It uses `tkinterdnd2` (MIT licence) for dropping files; if that cannot
+load, the window still works with the buttons. The window always runs the whole
+command, so the first file takes a minute longer while the models load.
 
 ## Known limits
 

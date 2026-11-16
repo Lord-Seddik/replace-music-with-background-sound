@@ -748,7 +748,7 @@ into two tasks that can each be checked on their own (agreed 2026-11-16):
   task lands. The default stays `none` until you have listened with real
   recordings (T18b "left to verify").
 
-### T23 — Never lay a wrong, distinctive sound `[hard]` — todo (asked for 2026-11-16)
+### T23 — Never lay a wrong, distinctive sound `[hard]` — done (waiting for you to listen)
 - Goal: about 40 % of fills sound wrong for the scene. When the tool is
   not sure of the scene, lay a neutral bed (soft room tone / air) instead
   of a distinctive recording (playground shouts, waves, insects); and from
@@ -762,8 +762,58 @@ into two tasks that can each be checked on their own (agreed 2026-11-16):
 - Verify: `pytest`; on the episode, share of fill time with a wrong
   distinctive sound (by my eye labels) before vs after; you listen to the
   same seven spots.
+- Diagnosis (2026-11-16): eye labels for all 180 pieces in
+  `experiments/t23_truth.py` (from `output/t23/sheet_*.jpg`). As run in
+  T18b, 294 of 772 s of fill were wrong (38 %, matching your "60 %
+  correct"). Causes: school interiors (library, classroom, corridors) and
+  some homes got the playground recording, because without a classroom
+  folder SigLIP picked the nearest folder it was offered, often with high
+  confidence; snowy flashbacks got waves/birds/insects; night shots got day
+  street sound; credits just before the opening gap (1:51–2:08) and around
+  the ending (22:05–22:20, the preview title) were filled.
+- Built: `library.py` — the model now chooses among **all** known scene
+  types plus label-only `snow` and `title`; `choose_scene` uses the
+  `neutral` folder (reserved) when the scene has no folder, a distinctive
+  scene scores under 0.5, or a day-outdoor scene lands on a dark still
+  (mean brightness < 0.3); no `neutral` folder → those stay empty.
+  `split_songs` takes in quiet gaps ≤ 4 s from a song (talk < 30 %).
+  `render_fill(steady=True)` cuts each recording at the steadiest of 8
+  random offsets. `cli.py` prints the neutral share. README updated.
+  `samples/ambience/neutral/` = BigSoundBank 2458 (house atmosphere, "to
+  be put very low"). Rules chosen with `experiments/t23_sim.py`. Tests:
+  6 new in `tests/test_library.py`; 251 pass in total.
+- Measured on the eye labels (real code path): wrong 71 of 691 s (10 %,
+  was 38 %); right scene-specific fill 178 s (was 231 s); neutral bed
+  255 s. Left wrong: mostly the playground recording on residential
+  streets and a lit house entrance at night (confident labels) — a calmer
+  schoolyard recording would soften that.
+- Episode run (`output/t23/run/`, 8:56): songs now skipped 1:51–3:19 and
+  21:59–23:35 (credits included); ambience under 11:20 in 81 places, 4:21
+  of it the neutral bed. Clips in `output/t23/listen/` (`_0_original`,
+  `_1_fill-before` = T18b run, `_2_fill-now`): the seven T18b spots plus
+  8 school library 6:42, 9 school corridor 8:53, 10 snow 13:56, 11 park
+  ball game 21:16 (3_forest-credits 1:49 is now left empty, as credits).
 
-### T24 — Drop-files window `[medium]` — todo (asked for 2026-11-16)
+- Your listening (2026-11-16): "more right", "definitely doesn't have an
+  all wrong one". Left: sometimes it "feels inside" when the scene is
+  outdoors — the space (closed room vs open air) does not match. → T25.
+
+### T25 — Neutral bed that matches indoors vs outdoors `[hard]` — todo (proposed)
+- Goal: the one neutral bed is a house room tone, so outdoor shots without
+  a confident scene sound like a closed room. Split it: `neutral_indoor`
+  (room tone) and `neutral_outdoor` (soft open air, distant town), chosen
+  per piece by an indoor/outdoor decision from the same SigLIP stills
+  ("indoors" vs "outdoors" prompts, plus brightness for night), and close-
+  ups take the space of their neighbours as scenes do now.
+- Work: add indoor/outdoor to the eye labels (`experiments/t23_truth.py`),
+  measure how often SigLIP gets the space right, choose the rule; pick one
+  or two CC0 open-air recordings; keep `neutral` working as the fallback
+  for either.
+- Files: `library.py`, tests, README, `samples/ambience/neutral_*`.
+- Verify: `pytest`; indoor/outdoor accuracy on the 180 pieces; share of
+  neutral fill with the wrong space before vs after; you listen.
+
+### T24 — Drop-files window `[medium]` — done (waiting for you to try it)
 - Goal: a small window for use without a terminal: drop video files (or a
   folder) on it, choose the main options (fill on/off and its library,
   keep ranges, keep original track), see progress per file, open the
@@ -777,6 +827,21 @@ into two tasks that can each be checked on their own (agreed 2026-11-16):
   makes the desktop shortcut.
 - Verify: `pytest`; by hand, a short clip dropped on the window goes
   through and the output folder opens; you try it once.
+- Built (2026-11-16, Sonnet agent; reviewed): `src/musicremover/gui.py`
+  (runs `python -m musicremover …` with an argument list, no console
+  window, reads `\r` progress on a thread, per-file status, Cancel kills
+  the process tree, "Open output folder"; Add buttons work if drag and
+  drop cannot load), `tests/test_gui.py` (18 tests), `pyproject.toml`
+  (`tkinterdnd2` 0.7.0, MIT; gui-script `music-remover-gui`), README
+  "Using the window", `scripts/make_shortcut.ps1`. Other packages
+  unchanged. Checked by the agent: window opens and closes; the exact
+  command it builds ran a 25 s clip on CPU with progress parsed; shortcut
+  script writes a .lnk (tested in a temp folder).
+- Left for you: drag files onto it with the mouse, the look, Browse
+  dialogs, Cancel and error pop-ups, double-click the desktop shortcut
+  (`powershell -File scripts/make_shortcut.ps1` makes it).
+- Known: a cancelled job leaves its `musicremover-*` temp folder in
+  %TEMP%; no device/quality options in the window.
 
 ### Optional ideas — decided 2026-11-16 (you left it to Claude)
 - `--fill generate` (T17, Stable Audio 3): **not built for now.** It picks

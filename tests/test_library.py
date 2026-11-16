@@ -8,10 +8,11 @@ import soundfile as sf
 
 from musicremover.gaps import Gap, frame_levels
 from musicremover.library import (
-    LEVEL_RANGE_DB, Library, Placement, excerpt, fill_level, load_library, make_fill,
-    plan_fill, read_recording, render_fill, split_songs, subtract_ranges,
+    DARK, LABEL_ONLY, LEVEL_RANGE_DB, MIN_SCORE, NEUTRAL, Library, Placement, choose_scene, excerpt,
+    fill_level, load_library, make_fill, plan_fill, read_recording, render_fill, split_songs,
+    subtract_ranges,
 )
-from musicremover.scenes import CLOSE_UP, DEFAULT_SCENES
+from musicremover.scenes import CLOSE_UP, DEFAULT_SCENES, SceneLabel
 
 RATE = 8000
 
@@ -66,11 +67,97 @@ def test_split_songs_skips_long_quiet_gaps_near_the_ends():
     opening = Gap(130, 200, -30, -80)       # 70 s, no talk, near the start: song
     talky = Gap(600, 680, -30, -80)          # long but talking: kept (and not near an end)
     middle = Gap(800, 900, -30, -80)         # long, quiet, mid-episode: kept
-    short_end = Gap(1400, 1430, -30, -80)    # near the end but short: kept
+    short_end = Gap(1380, 1410, -30, -80)    # near the end but short, and 10 s from the song: kept
     ending = Gap(1420, 1500, -30, -80)
     keep, songs = split_songs([opening, talky, middle, short_end, ending], speech, duration)
     assert songs == [opening, ending]
     assert keep == [talky, middle, short_end]
+
+
+def test_split_songs_takes_in_quiet_credits_right_next_to_a_song():
+    duration = 1500.0
+    speech = np.full(int(duration * 10), -90.0)
+    speech[11300:11400] = -20  # 1130-1140 s: talking
+    song = Gap(130, 200, -30, -80)
+    credits_before = Gap(110, 127, -30, -80)   # 3 s before the song, quiet: song too
+    credits_before2 = Gap(95, 108, -30, -80)   # 2 s before that one: song too (chains)
+    talky_next = Gap(1128, 1145, -30, -80)     # next to nothing: kept
+    after_far = Gap(205, 215, -30, -80)        # 5 s after the song: kept
+    end_song = Gap(1350, 1420, -30, -80)
+    talky_after = Gap(1422, 1440, -30, -80)
+    speech[14220:14400] = -20                  # the preview after the ending talks: kept
+    keep, songs = split_songs([credits_before2, credits_before, song, after_far, talky_next, end_song,
+                               talky_after], speech, duration)
+    assert songs == [credits_before2, credits_before, song, end_song]
+    assert keep == [after_far, talky_next, talky_after]
+
+
+def label(name, score=0.9):
+    return SceneLabel(name, score, "x", 0.0)
+
+
+def test_library_scenes_offer_every_known_scene_but_not_neutral(lib_dir):
+    (lib_dir / NEUTRAL).mkdir()
+    sf.write(lib_dir / NEUTRAL / "n.wav", noise(2, channels=1).T, RATE)
+    scenes = load_library(lib_dir).scenes()
+    assert scenes["classroom"] == DEFAULT_SCENES["classroom"]  # no folder, still a choice
+    assert set(LABEL_ONLY) <= set(scenes)
+    assert NEUTRAL not in scenes
+
+
+def test_choose_scene_falls_back_to_neutral_when_unsure(lib_dir):
+    lib = load_library(lib_dir)  # park, beach, temple_yard
+    assert choose_scene(label("park"), 0.6, lib) == "park"
+    assert choose_scene(label(CLOSE_UP, 0.2), 0.6, lib) == CLOSE_UP
+    assert choose_scene(label("classroom"), 0.6, lib) == NEUTRAL       # no folder
+    assert choose_scene(label("snow"), 0.6, lib) == NEUTRAL            # label-only choice
+    assert choose_scene(label("park", MIN_SCORE - 0.01), 0.6, lib) == NEUTRAL  # unsure, distinctive
+    assert choose_scene(label("temple_yard", MIN_SCORE - 0.01), 0.6, lib) == NEUTRAL  # unknown kind
+    assert choose_scene(label("park"), DARK - 0.01, lib) == NEUTRAL    # day sound on a night shot
+    assert choose_scene(label("temple_yard"), DARK - 0.01, lib) == "temple_yard"
+
+
+def test_choose_scene_keeps_quiet_rooms_even_when_unsure(tmp_path):
+    d = tmp_path / "lib" / "bedroom"
+    d.mkdir(parents=True)
+    sf.write(d / "a.wav", noise(2, channels=1).T, RATE)
+    lib = load_library(tmp_path / "lib")
+    assert choose_scene(label("bedroom", 0.2), 0.1, lib) == "bedroom"
+
+
+def test_render_fill_steady_avoids_a_loud_event(tmp_path):
+    rec = noise(20, db=-40, channels=1)
+    rec[:, 2 * RATE:18 * RATE] *= 0          # silence, then
+    rec[:, 2 * RATE:18 * RATE] += noise(16, db=-40, channels=1, seed=5)
+    rec[:, 9 * RATE:10 * RATE] *= 100        # one loud second in the middle (+40 dB)
+    d = tmp_path / "lib" / "park"
+    d.mkdir(parents=True)
+    sf.write(d / "a.wav", rec.T, RATE)
+    lib = load_library(tmp_path / "lib")
+    pl = [Placement(0.0, 4.0, "park", -45.0, 0)]
+    peaks = []
+    for seed in range(6):
+        out = render_fill(pl, lib, 1, 4 * RATE, RATE, seed=seed, steady=True)
+        levels = frame_levels(out[:, RATE:3 * RATE], RATE)  # away from the fades
+        peaks.append(levels.max() - np.median(levels))
+    assert max(peaks) < 10  # never the loud second
+
+
+def test_make_fill_leaves_unsure_pieces_empty_without_a_neutral_folder(red_blue_video, lib_dir):
+    stems = {"speech": np.zeros((2, 6 * RATE), np.float32),
+             "music": noise(6, db=-30), "effects": noise(6, db=-90, seed=3)}
+
+    class Unsure:  # every piece looks like a classroom, which has no folder
+        def scores(self, images, texts):
+            return np.array([[5.0 if "classroom" in t else 0.0 for t in texts] for _ in images])
+
+    fill, report = make_fill(stems, RATE, red_blue_video, load_library(lib_dir), Unsure(), cuts=[3.0])
+    assert fill is None and report.placements == [] and len(report.unfilled) == 1
+
+    (lib_dir / NEUTRAL).mkdir()
+    sf.write(lib_dir / NEUTRAL / "n.wav", noise(2, channels=1).T, RATE)
+    fill, report = make_fill(stems, RATE, red_blue_video, load_library(lib_dir), Unsure(), cuts=[3.0])
+    assert [(p.start, p.end, p.scene) for p in report.placements] == [(0.0, 6.0, NEUTRAL)]
 
 
 def test_subtract_ranges_cuts_keep_ranges_out():

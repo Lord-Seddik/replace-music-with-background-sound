@@ -17,7 +17,9 @@ from typing import Callable, Sequence
 import numpy as np
 
 from .gaps import Gap, find_gaps, frame_levels, split_at_cuts
-from .scenes import CLOSE_UP, DEFAULT_SCENES, SceneModel, grab_frames, label_scenes, scene_cuts, still_times
+from .scenes import (
+    CLOSE_UP, DEFAULT_SCENES, SceneLabel, SceneModel, grab_frames, label_scenes, scene_cuts, still_times,
+)
 
 AUDIO_EXTENSIONS = {".wav", ".flac", ".ogg", ".mp3"}
 MIN_RECORDING_S = 1.0
@@ -35,7 +37,25 @@ NEIGHBOUR_S = 30.0          # a close-up may borrow a scene from another gap thi
 SONG_MIN_S = 60.0
 SONG_MAX_TALK = 0.2
 SONG_EDGE_S = 300.0
+SONG_JOIN_S = 4.0           # a song also takes in neighbouring gaps this close ...
+SONG_EDGE_TALK = 0.3        # ... with less talking than this (credits before/after it)
 TALK_DB = -45.0             # speech stem above this = someone is talking (as in T15)
+
+# When unsure of the scene, lay a neutral bed instead of a distinctive sound (T23,
+# chosen against eye labels of Clannad E20: wrong fill fell from ~38 % to ~10 %).
+NEUTRAL = "neutral"         # library folder with soft room tone/air; without it, unsure pieces stay empty
+QUIET_SCENES = frozenset({"bedroom", "kitchen", "living_room", "shop", "classroom", "school_corridor",
+                          "hospital", "train", "workplace"})  # room-like: used whenever chosen
+DAY_SCENES = frozenset({"schoolyard", "quiet_street", "city_street", "park", "beach", "countryside", "forest"})
+MIN_SCORE = 0.5             # any other scene needs this share of the model's match
+DARK = 0.3                  # mean brightness (0-1) of a piece's stills below which it is night: no day sounds
+# Choices offered to the model that never have a sound of their own: they only keep
+# such shots from being mistaken for a scene that has one (snow looked like a beach).
+LABEL_ONLY: dict[str, str] = {
+    "snow": "a snowy landscape in winter",
+    "title": "a title card with text on a plain background",
+}
+STEADY_TRIES = 8            # excerpt offsets tried per placement; the steadiest is used
 
 
 @dataclass(frozen=True)
@@ -44,10 +64,29 @@ class Library:
     sounds: dict[str, tuple[Path, ...]]  # scene name -> recordings
 
     def scenes(self) -> dict[str, str]:
-        """Scene descriptions for the model: the library's folders plus `close_up`."""
-        out = {n: DEFAULT_SCENES.get(n, "a " + n.replace("_", " ").replace("-", " ")) for n in self.sounds}
-        out[CLOSE_UP] = DEFAULT_SCENES[CLOSE_UP]
+        """Scene descriptions for the model: every known scene type (with or without a
+        folder, so a classroom is not mistaken for the nearest scene that has one), the
+        label-only choices, the library's own folder names, and `close_up`."""
+        out = dict(DEFAULT_SCENES) | LABEL_ONLY
+        for n in self.sounds:
+            if n != NEUTRAL and n not in out:
+                out[n] = "a " + n.replace("_", " ").replace("-", " ")
         return out
+
+
+def choose_scene(label: SceneLabel, brightness: float, library: Library) -> str:
+    """The folder to fill a piece from: its label when the library has it and the
+    label is safe to use, `close_up` to borrow from a neighbour, else NEUTRAL."""
+    name = label.label
+    if name == CLOSE_UP:
+        return CLOSE_UP
+    if name == NEUTRAL or name not in library.sounds:
+        return NEUTRAL
+    if name not in QUIET_SCENES and label.score < MIN_SCORE:
+        return NEUTRAL
+    if brightness < DARK and name in DAY_SCENES:
+        return NEUTRAL
+    return name
 
 
 def load_library(root: str | Path) -> Library:
@@ -90,15 +129,26 @@ def talk_share(speech_db: np.ndarray, start: float, end: float, frame_s: float =
 
 
 def split_songs(gaps: list[Gap], speech_db: np.ndarray, duration: float) -> tuple[list[Gap], list[Gap]]:
-    """(gaps to fill, gaps that look like the opening or ending song)."""
-    keep, songs = [], []
-    for g in gaps:
-        near_edge = g.start < SONG_EDGE_S or g.end > duration - SONG_EDGE_S
-        if near_edge and g.length >= SONG_MIN_S and talk_share(speech_db, g.start, g.end) < SONG_MAX_TALK:
-            songs.append(g)
-        else:
-            keep.append(g)
-    return keep, songs
+    """(gaps to fill, gaps that look like the opening or ending song).
+
+    A song is a long gap with almost no talking near either end. It then takes in
+    neighbouring gaps closer than SONG_JOIN_S with little talking: the credits that
+    start a little before the song gap or run on after it."""
+    gaps = sorted(gaps, key=lambda g: g.start)
+    talk = [talk_share(speech_db, g.start, g.end) for g in gaps]
+    song = [(g.start < SONG_EDGE_S or g.end > duration - SONG_EDGE_S) and g.length >= SONG_MIN_S
+            and t < SONG_MAX_TALK for g, t in zip(gaps, talk)]
+    changed = True
+    while changed:
+        changed = False
+        for i, g in enumerate(gaps):
+            if song[i] or talk[i] >= SONG_EDGE_TALK:
+                continue
+            before = i > 0 and song[i - 1] and g.start - gaps[i - 1].end <= SONG_JOIN_S
+            after = i + 1 < len(gaps) and song[i + 1] and gaps[i + 1].start - g.end <= SONG_JOIN_S
+            if before or after:
+                song[i] = changed = True
+    return [g for g, s in zip(gaps, song) if not s], [g for g, s in zip(gaps, song) if s]
 
 
 def subtract_ranges(gaps: list[Gap], ranges: Sequence[tuple[float, float]], min_s: float = 2.0) -> list[Gap]:
@@ -287,6 +337,7 @@ def render_fill(
     level_offset_db: float = 0.0,
     out: np.ndarray | None = None,
     block: int = _BLOCK,
+    steady: bool = False,
 ) -> np.ndarray:
     """The fill track (channels, length): each placement gets a recording of its
     scene at its level (plus `level_offset_db`), faded in/out at gap edges and
@@ -295,11 +346,16 @@ def render_fill(
     Placements are rendered `block` samples at a time. `out` may be a zero-filled
     (channels, length) float32 array such as a memory-mapped file; the fill is
     added into it, and no array longer than a block is made.
+
+    With `steady`, a recording longer than the placement is cut where it is
+    steadiest (of STEADY_TRIES random offsets, the one whose loudest moment stands
+    least above its median), so a shout or a horn in the recording is avoided.
     """
     if out is None:
         out = np.zeros((channels, length), np.float32)
     rng = np.random.default_rng(seed)
     cache: dict[Path, tuple[np.ndarray, float]] = {}
+    level_cache: dict[Path, np.ndarray] = {}
     edge, scene_fade = int(EDGE_FADE_S * sample_rate), int(SCENE_FADE_S * sample_rate)
     half = SCENE_FADE_S / 2
     for k, pl in enumerate(placements):
@@ -314,7 +370,12 @@ def render_fill(
         if path not in cache:
             cache[path] = read(path, sample_rate, channels)
         audio, level = cache[path]
-        xf, pieces = _plan_excerpt(audio.shape[1], b - a, rng, int(LOOP_FADE_S * sample_rate))
+        if steady and audio.shape[1] >= b - a:
+            if path not in level_cache:
+                level_cache[path] = frame_levels(audio, sample_rate)
+            xf, pieces = 0, [(0, _steadiest(level_cache[path], audio.shape[1], b - a, sample_rate, rng), True)]
+        else:
+            xf, pieces = _plan_excerpt(audio.shape[1], b - a, rng, int(LOOP_FADE_S * sample_rate))
         gain = np.float32(10 ** ((pl.level_db + level_offset_db - level) / 20))
         fade_in, fade_out = scene_fade if before else edge, scene_fade if after else edge
         for lo in range(0, b - a, block):
@@ -322,6 +383,21 @@ def render_fill(
             seg = _excerpt_block(audio, b - a, xf, pieces, lo, hi)
             out[:, a + lo:a + hi] += seg * gain * _envelope(b - a, fade_in, fade_out, lo, hi)
     return out
+
+
+def _steadiest(levels: np.ndarray, m: int, length: int, sample_rate: int, rng: np.random.Generator,
+               frame_s: float = 0.1) -> int:
+    """Start (in samples) of the steadiest `length`-sample window of a recording of
+    `m` samples, among STEADY_TRIES random starts; `levels` are its frame levels (dB)."""
+    starts = rng.integers(0, m - length + 1, size=STEADY_TRIES)
+    best, best_key = int(starts[0]), None
+    for s in starts:
+        a = int(s / sample_rate / frame_s)
+        seg = levels[a:max(a + 1, int((s + length) / sample_rate / frame_s))]
+        key = float(seg.max() - np.median(seg))
+        if best_key is None or key < best_key:
+            best, best_key = int(s), key
+    return best
 
 
 def add_fill(effects: np.ndarray, fill: np.ndarray, block: int = _BLOCK) -> None:
@@ -373,10 +449,15 @@ def make_fill(
     if not hasattr(model, "scores"):
         model = model()
     labels = label_scenes(stills, model, library.scenes())
-    report.placements, report.unfilled = plan_fill(pieces, [lb.label for lb in labels])
+    brightness = [float(np.mean([s.mean() for s in group])) / 255 for group in stills]
+    chosen = [choose_scene(lb, b, library) for lb, b in zip(labels, brightness)]
+    report.placements, report.unfilled = plan_fill(pieces, chosen)
+    if NEUTRAL not in library.sounds:  # no neutral bed: leave the unsure pieces empty
+        report.unfilled += [Gap(p.start, p.end, 0.0, 0.0) for p in report.placements if p.scene == NEUTRAL]
+        report.placements = [p for p in report.placements if p.scene != NEUTRAL]
     if not report.placements:
         return None, report
     progress("laying ambience")
     return render_fill(report.placements, library, channels, length, sample_rate,
-                       level_offset_db=level_offset_db,
+                       level_offset_db=level_offset_db, steady=True,
                        out=None if allocate is None else allocate((channels, length))), report
